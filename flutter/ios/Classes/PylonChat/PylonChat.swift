@@ -456,7 +456,7 @@ public class PylonChatView: UIView {
                             var FAB_ID = 'pylon-chat-bubble';
                             var OFFSET_PX = \(Int(config.bubbleBottomOffset));
 
-                            function targets() {
+                            function currentTargets() {
                                 var bubble = doc.getElementById(FAB_ID);
                                 if (!bubble) return [];
                                 var list = [bubble];
@@ -464,13 +464,23 @@ public class PylonChatView: UIView {
                                 return list;
                             }
 
+                            // The elements we last applied the offset to. Opening the
+                            // chat window can unmount the bubble outright rather than
+                            // just hiding it, replacing it with the chat panel inside
+                            // that same parent — so resetting has to clean up the exact
+                            // elements it touched, not re-query for the bubble by ID,
+                            // or a stale margin is left behind on what is now the
+                            // panel's own container.
+                            var appliedTargets = [];
+
                             win.PylonNativeChatWindowOpen = false;
 
                             win.PylonNativeResetChatBubbleBottomOffset = function() {
-                                targets().forEach(function(t) {
+                                appliedTargets.forEach(function(t) {
                                     t.style.removeProperty('bottom');
                                     t.style.removeProperty('margin-bottom');
                                 });
+                                appliedTargets = [];
                             };
 
                             win.PylonNativeApplyChatBubbleBottomOffset = function() {
@@ -479,10 +489,12 @@ public class PylonChatView: UIView {
                                     win.PylonNativeResetChatBubbleBottomOffset();
                                     return;
                                 }
-                                targets().forEach(function(t) {
+                                var list = currentTargets();
+                                list.forEach(function(t) {
                                     t.style.setProperty('bottom', 'env(safe-area-inset-bottom)', 'important');
                                     t.style.setProperty('margin-bottom', OFFSET_PX + 'px', 'important');
                                 });
+                                appliedTargets = list;
                             };
 
                             // The bubble mounts asynchronously and can re-render on its
