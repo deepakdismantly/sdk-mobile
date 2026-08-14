@@ -151,7 +151,9 @@ class PylonChatPlatformView: NSObject, FlutterPlatformView {
             primaryColor: map["primaryColor"] as? String,
             debugMode: map["debugMode"] as? Bool ?? false,
             widgetBaseUrl: map["widgetBaseUrl"] as? String,
-            widgetScriptUrl: map["widgetScriptUrl"] as? String
+            widgetScriptUrl: map["widgetScriptUrl"] as? String,
+            // Points map 1:1 onto Flutter's logical pixels, so no scaling needed.
+            bubbleBottomOffset: (map["bubbleBottomOffset"] as? NSNumber)?.doubleValue ?? 0
         )
     }
 

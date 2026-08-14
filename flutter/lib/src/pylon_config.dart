@@ -14,6 +14,7 @@ class PylonConfig {
     this.debugMode = false,
     this.widgetBaseUrl,
     this.widgetScriptUrl,
+    this.bubbleBottomOffset = 0,
   });
 
   /// The host the chat widget is served from when [widgetBaseUrl] is omitted.
@@ -45,6 +46,15 @@ class PylonConfig {
   /// Defaults to `<widgetBaseUrl>/widget/<appId>`.
   final String? widgetScriptUrl;
 
+  /// Extra space, in logical pixels, kept clear below the chat bubble's
+  /// resting position — so your app's own bottom chrome (a tab bar, a nav
+  /// bar) doesn't sit under it.
+  ///
+  /// Applied on top of the device's own safe-area inset; zero (no extra
+  /// space) by default. Has no effect on the full chat window, only the
+  /// closed bubble.
+  final double bubbleBottomOffset;
+
   /// Returns a copy of this config with the given fields replaced.
   PylonConfig copyWith({
     String? appId,
@@ -53,6 +63,7 @@ class PylonConfig {
     bool? debugMode,
     String? widgetBaseUrl,
     String? widgetScriptUrl,
+    double? bubbleBottomOffset,
   }) {
     return PylonConfig(
       appId: appId ?? this.appId,
@@ -61,6 +72,7 @@ class PylonConfig {
       debugMode: debugMode ?? this.debugMode,
       widgetBaseUrl: widgetBaseUrl ?? this.widgetBaseUrl,
       widgetScriptUrl: widgetScriptUrl ?? this.widgetScriptUrl,
+      bubbleBottomOffset: bubbleBottomOffset ?? this.bubbleBottomOffset,
     );
   }
 
@@ -73,6 +85,7 @@ class PylonConfig {
       'debugMode': debugMode,
       'widgetBaseUrl': widgetBaseUrl,
       'widgetScriptUrl': widgetScriptUrl,
+      'bubbleBottomOffset': bubbleBottomOffset,
     };
   }
 
@@ -85,7 +98,8 @@ class PylonConfig {
         other.primaryColor == primaryColor &&
         other.debugMode == debugMode &&
         other.widgetBaseUrl == widgetBaseUrl &&
-        other.widgetScriptUrl == widgetScriptUrl;
+        other.widgetScriptUrl == widgetScriptUrl &&
+        other.bubbleBottomOffset == bubbleBottomOffset;
   }
 
   @override
@@ -96,6 +110,7 @@ class PylonConfig {
     debugMode,
     widgetBaseUrl,
     widgetScriptUrl,
+    bubbleBottomOffset,
   );
 
   @override

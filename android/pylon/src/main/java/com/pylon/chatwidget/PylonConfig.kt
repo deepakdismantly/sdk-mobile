@@ -12,7 +12,13 @@ data class PylonConfig internal constructor(
     val primaryColor: String?,
     val debugMode: Boolean,
     val widgetBaseUrl: String,
-    val widgetScriptUrl: String
+    val widgetScriptUrl: String,
+    /**
+     * Extra space, in device pixels, kept clear below the chat bubble's resting
+     * position — so a host app's own bottom chrome (tab bar, nav bar) doesn't sit
+     * under it. Applied on top of the safe-area inset; zero by default.
+     */
+    val bubbleBottomOffsetPx: Int
 ) {
 
     class Builder internal constructor(private val appId: String) {
@@ -21,6 +27,7 @@ data class PylonConfig internal constructor(
         var debugMode: Boolean = false
         var widgetBaseUrl: String = DEFAULT_WIDGET_BASE_URL
         var widgetScriptUrl: String = defaultScriptUrl(appId)
+        var bubbleBottomOffsetPx: Int = 0
 
         internal fun build(): PylonConfig {
             val scriptUrl = widgetScriptUrl.ifBlank { defaultScriptUrl(appId) }
@@ -30,7 +37,8 @@ data class PylonConfig internal constructor(
                 primaryColor = primaryColor,
                 debugMode = debugMode,
                 widgetBaseUrl = widgetBaseUrl.ifBlank { DEFAULT_WIDGET_BASE_URL },
-                widgetScriptUrl = scriptUrl
+                widgetScriptUrl = scriptUrl,
+                bubbleBottomOffsetPx = bubbleBottomOffsetPx
             )
         }
     }
@@ -54,6 +62,7 @@ data class PylonConfig internal constructor(
                 debugMode = existing.debugMode
                 widgetBaseUrl = existing.widgetBaseUrl
                 widgetScriptUrl = existing.widgetScriptUrl
+                bubbleBottomOffsetPx = existing.bubbleBottomOffsetPx
             }
             builder.block()
             return builder.build()

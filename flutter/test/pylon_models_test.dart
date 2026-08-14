@@ -28,6 +28,7 @@ void main() {
         'debugMode': false,
         'widgetBaseUrl': null,
         'widgetScriptUrl': null,
+        'bubbleBottomOffset': 0.0,
       });
     });
   });

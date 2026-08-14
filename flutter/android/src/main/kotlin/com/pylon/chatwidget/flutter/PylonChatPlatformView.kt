@@ -174,6 +174,10 @@ class PylonChatPlatformView(
             primaryColor = map["primaryColor"] as? String
             (map["widgetBaseUrl"] as? String)?.let { widgetBaseUrl = it }
             (map["widgetScriptUrl"] as? String)?.let { widgetScriptUrl = it }
+            // Dart passes logical pixels; the WebView's CSS operates in device
+            // pixels, the same conversion already applied to interactive bounds.
+            val bubbleBottomOffsetLogicalPx = (map["bubbleBottomOffset"] as? Number)?.toDouble() ?: 0.0
+            bubbleBottomOffsetPx = (bubbleBottomOffsetLogicalPx * density).toInt()
         }
     }
 

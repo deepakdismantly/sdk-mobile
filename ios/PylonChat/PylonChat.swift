@@ -18,6 +18,10 @@ public struct PylonConfig {
     public let debugMode: Bool
     public let widgetBaseUrl: String
     public let widgetScriptUrl: String
+    /// Extra space, in points, kept clear below the chat bubble's resting position —
+    /// so a host app's own bottom chrome (tab bar, nav bar) doesn't sit under it.
+    /// Applied on top of the safe-area inset; zero by default.
+    public let bubbleBottomOffset: CGFloat
 
     private static let defaultWidgetBaseUrl = "https://widget.usepylon.com"
 
@@ -26,13 +30,15 @@ public struct PylonConfig {
                 primaryColor: String? = nil,
                 debugMode: Bool = false,
                 widgetBaseUrl: String? = nil,
-                widgetScriptUrl: String? = nil) {
+                widgetScriptUrl: String? = nil,
+                bubbleBottomOffset: CGFloat = 0) {
         self.appId = appId
         self.enableLogging = enableLogging
         self.primaryColor = primaryColor
         self.debugMode = debugMode
         self.widgetBaseUrl = widgetBaseUrl ?? Self.defaultWidgetBaseUrl
-        
+        self.bubbleBottomOffset = bubbleBottomOffset
+
         // URL-encode the appId for the script URL
         let encodedAppId = appId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? appId
         self.widgetScriptUrl = widgetScriptUrl ?? "\(Self.defaultWidgetBaseUrl)/widget/\(encodedAppId)"
@@ -420,11 +426,13 @@ public class PylonChatView: UIView {
                 // the widget ever renders. Stub it out so that install is a no-op
                 // instead of a crash.
                 //
-                // The widget's own loader mounts the real bundle inside a same-origin
-                // iframe it creates at runtime, which gets a fresh, isolated `window`
-                // that does not inherit anything we set on this outer page's `window`.
-                // So the shim has to be (re)installed on every such iframe too, the
-                // moment it's attached — before the loader inserts its script tag.
+                // The widget's own loader mounts the real bundle — and the chat
+                // bubble element itself — inside a same-origin iframe it creates at
+                // runtime, which gets a fresh, isolated `window` that does not
+                // inherit anything we set on this outer page's `window`. So the
+                // shim (and the bubble-offset logic below) has to be (re)installed
+                // on every such iframe too, the moment it's attached — before the
+                // loader inserts its script tag.
                 (function() {
                     function installIteratorShim(win) {
                         try {
@@ -435,7 +443,65 @@ public class PylonChatView: UIView {
                         } catch (e) {}
                     }
 
+                    // Keeps the chat bubble clear of a host app's own bottom chrome.
+                    // Reset while the chat window is open — the bubble and its
+                    // container may be shared with the full chat panel, and the
+                    // panel itself should not be pushed up.
+                    function installBubbleOffsetLogic(win) {
+                        try {
+                            if (!win || win.__pylonNativeBubbleOffsetInstalled) return;
+                            win.__pylonNativeBubbleOffsetInstalled = true;
+
+                            var doc = win.document;
+                            var FAB_ID = 'pylon-chat-bubble';
+                            var OFFSET_PX = \(Int(config.bubbleBottomOffset));
+
+                            function targets() {
+                                var bubble = doc.getElementById(FAB_ID);
+                                if (!bubble) return [];
+                                var list = [bubble];
+                                if (bubble.parentElement) list.push(bubble.parentElement);
+                                return list;
+                            }
+
+                            win.PylonNativeChatWindowOpen = false;
+
+                            win.PylonNativeResetChatBubbleBottomOffset = function() {
+                                targets().forEach(function(t) {
+                                    t.style.removeProperty('bottom');
+                                    t.style.removeProperty('margin-bottom');
+                                });
+                            };
+
+                            win.PylonNativeApplyChatBubbleBottomOffset = function() {
+                                if (OFFSET_PX <= 0) return;
+                                if (win.PylonNativeChatWindowOpen === true) {
+                                    win.PylonNativeResetChatBubbleBottomOffset();
+                                    return;
+                                }
+                                targets().forEach(function(t) {
+                                    t.style.setProperty('bottom', 'env(safe-area-inset-bottom)', 'important');
+                                    t.style.setProperty('margin-bottom', OFFSET_PX + 'px', 'important');
+                                });
+                            };
+
+                            // The bubble mounts asynchronously and can re-render on its
+                            // own (unread badges, popups) without telling us, so keep
+                            // re-checking rather than relying on a single application.
+                            [0, 150, 300, 600, 1000, 1500, 2500, 4000].forEach(function(delay) {
+                                win.setTimeout(win.PylonNativeApplyChatBubbleBottomOffset, delay);
+                            });
+
+                            if (win.MutationObserver && (doc.body || doc.documentElement)) {
+                                new win.MutationObserver(function() {
+                                    win.PylonNativeApplyChatBubbleBottomOffset();
+                                }).observe(doc.body || doc.documentElement, { childList: true, subtree: true });
+                            }
+                        } catch (e) {}
+                    }
+
                     installIteratorShim(window);
+                    installBubbleOffsetLogic(window);
 
                     var originalAppendChild = Node.prototype.appendChild;
                     Node.prototype.appendChild = function(child) {
@@ -443,6 +509,7 @@ public class PylonChatView: UIView {
                         try {
                             if (child && child.tagName === 'IFRAME' && child.contentWindow) {
                                 installIteratorShim(child.contentWindow);
+                                installBubbleOffsetLogic(child.contentWindow);
                             }
                         } catch (e) {}
                         return result;
@@ -727,6 +794,26 @@ public class PylonChatView: UIView {
         webView.evaluateJavaScript(script, completionHandler: nil)
     }
 
+    /// Tells the bubble-offset logic installed inside the widget's iframe
+    /// (see `generateHTML()`) whether the chat window is open, so it can back
+    /// off the offset rather than pushing the full chat panel up with it.
+    private func setBubbleOffsetChatOpenState(_ isOpen: Bool) {
+        guard config.bubbleBottomOffset > 0 else { return }
+        let script = """
+        (function() {
+            var frame = document.getElementById('pylon-frame');
+            var win = frame && frame.contentWindow;
+            if (!win) return;
+            win.PylonNativeChatWindowOpen = \(isOpen);
+            var fn = \(isOpen)
+                ? win.PylonNativeResetChatBubbleBottomOffset
+                : win.PylonNativeApplyChatBubbleBottomOffset;
+            if (fn) fn();
+        })();
+        """
+        executeJavaScript(script)
+    }
+
     private func invokePylonCommand(_ command: String, arguments: [String] = [], isJsonObject: Bool = false) {
         let script: String
         if arguments.isEmpty {
@@ -792,10 +879,12 @@ extension PylonChatView: WKScriptMessageHandler {
             case "onChatWindowOpened":
                 self.log("📱 Pylon: Chat Window OPENED ✅")
                 self.isChatWindowOpen = true
+                self.setBubbleOffsetChatOpenState(true)
                 self.listener?.onChatOpened()
             case "onChatWindowClosed":
                 let wasOpen = self.isChatWindowOpen
                 self.log("📱 Pylon: Chat Window CLOSED ❌ (wasOpen: \(wasOpen))")
+                self.setBubbleOffsetChatOpenState(false)
                 self.isChatWindowOpen = false
                 self.listener?.onChatClosed(wasOpen: wasOpen)
             case "onUnreadCountChanged":

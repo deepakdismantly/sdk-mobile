@@ -471,6 +471,28 @@ class PylonChat : FrameLayout {
         webView.evaluateJavascript(jsCode, null)
     }
 
+    /**
+     * Tells the bubble-offset logic installed inside the widget's iframe (see
+     * [generateHtml]) whether the chat window is open, so it can back off the
+     * offset rather than pushing the full chat panel up with it.
+     */
+    private fun setBubbleOffsetChatOpenState(isOpen: Boolean) {
+        if (config.bubbleBottomOffsetPx <= 0) return
+        val js = """
+            javascript:(function() {
+                var frame = document.getElementById('pylon-frame');
+                var win = frame && frame.contentWindow;
+                if (!win) return;
+                win.PylonNativeChatWindowOpen = $isOpen;
+                var fn = $isOpen
+                    ? win.PylonNativeResetChatBubbleBottomOffset
+                    : win.PylonNativeApplyChatBubbleBottomOffset;
+                if (fn) fn();
+            })();
+        """.trimIndent()
+        webView.evaluateJavascript(js, null)
+    }
+
     fun openChat() {
         webView.evaluateJavascript("javascript:if(window.Pylon) { window.Pylon('show'); }", null)
     }
@@ -637,6 +659,85 @@ class PylonChat : FrameLayout {
             </head>
             <body>
                 <script>
+                    // The widget's own loader mounts the real bundle — and the chat
+                    // bubble element itself — inside a same-origin iframe it creates
+                    // at runtime, which gets a fresh, isolated `window` that does not
+                    // inherit anything set on this outer page's `window`. So this has
+                    // to be (re)installed on every such iframe too, the moment it's
+                    // attached — before the loader inserts its script tag.
+                    (function() {
+                        // Keeps the chat bubble clear of a host app's own bottom
+                        // chrome. Reset while the chat window is open — the bubble
+                        // and its container may be shared with the full chat panel,
+                        // and the panel itself should not be pushed up.
+                        function installBubbleOffsetLogic(win) {
+                            try {
+                                if (!win || win.__pylonNativeBubbleOffsetInstalled) return;
+                                win.__pylonNativeBubbleOffsetInstalled = true;
+
+                                var doc = win.document;
+                                var FAB_ID = 'pylon-chat-bubble';
+                                var OFFSET_PX = ${config.bubbleBottomOffsetPx};
+
+                                function targets() {
+                                    var bubble = doc.getElementById(FAB_ID);
+                                    if (!bubble) return [];
+                                    var list = [bubble];
+                                    if (bubble.parentElement) list.push(bubble.parentElement);
+                                    return list;
+                                }
+
+                                win.PylonNativeChatWindowOpen = false;
+
+                                win.PylonNativeResetChatBubbleBottomOffset = function() {
+                                    targets().forEach(function(t) {
+                                        t.style.removeProperty('bottom');
+                                        t.style.removeProperty('margin-bottom');
+                                    });
+                                };
+
+                                win.PylonNativeApplyChatBubbleBottomOffset = function() {
+                                    if (OFFSET_PX <= 0) return;
+                                    if (win.PylonNativeChatWindowOpen === true) {
+                                        win.PylonNativeResetChatBubbleBottomOffset();
+                                        return;
+                                    }
+                                    targets().forEach(function(t) {
+                                        t.style.setProperty('bottom', 'env(safe-area-inset-bottom)', 'important');
+                                        t.style.setProperty('margin-bottom', OFFSET_PX + 'px', 'important');
+                                    });
+                                };
+
+                                // The bubble mounts asynchronously and can re-render on
+                                // its own (unread badges, popups) without telling us, so
+                                // keep re-checking rather than relying on one application.
+                                [0, 150, 300, 600, 1000, 1500, 2500, 4000].forEach(function(delay) {
+                                    win.setTimeout(win.PylonNativeApplyChatBubbleBottomOffset, delay);
+                                });
+
+                                if (win.MutationObserver && (doc.body || doc.documentElement)) {
+                                    new win.MutationObserver(function() {
+                                        win.PylonNativeApplyChatBubbleBottomOffset();
+                                    }).observe(doc.body || doc.documentElement, { childList: true, subtree: true });
+                                }
+                            } catch (e) {}
+                        }
+
+                        installBubbleOffsetLogic(window);
+
+                        var originalAppendChild = Node.prototype.appendChild;
+                        Node.prototype.appendChild = function(child) {
+                            var result = originalAppendChild.call(this, child);
+                            try {
+                                if (child && child.tagName === 'IFRAME' && child.contentWindow) {
+                                    installBubbleOffsetLogic(child.contentWindow);
+                                }
+                            } catch (e) {}
+                            return result;
+                        };
+                    })();
+                </script>
+                <script>
                     if (!window.pylon) {
                         window.pylon = {};
                     }
@@ -730,6 +831,7 @@ class PylonChat : FrameLayout {
         fun onChatWindowOpened() {
             post {
                 isChatWindowOpen = true
+                setBubbleOffsetChatOpenState(true)
                 listener?.onChatOpened()
             }
         }
@@ -738,6 +840,7 @@ class PylonChat : FrameLayout {
         fun onChatWindowClosed() {
             post {
                 isChatWindowOpen = false
+                setBubbleOffsetChatOpenState(false)
                 listener?.onChatClosed()
             }
         }
