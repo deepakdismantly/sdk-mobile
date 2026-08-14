@@ -413,6 +413,43 @@ public class PylonChatView: UIView {
         </head>
         <body>
             <script>
+                // The widget's script bundle assumes the `Iterator` global (Iterator
+                // Helpers, TC39 stage 4) always exists and installs polyfill methods
+                // onto its prototype without checking. WebKit only added `Iterator`
+                // in iOS 18.4; on older versions this throws a ReferenceError before
+                // the widget ever renders. Stub it out so that install is a no-op
+                // instead of a crash.
+                //
+                // The widget's own loader mounts the real bundle inside a same-origin
+                // iframe it creates at runtime, which gets a fresh, isolated `window`
+                // that does not inherit anything we set on this outer page's `window`.
+                // So the shim has to be (re)installed on every such iframe too, the
+                // moment it's attached — before the loader inserts its script tag.
+                (function() {
+                    function installIteratorShim(win) {
+                        try {
+                            if (win && typeof win.Iterator === 'undefined') {
+                                win.Iterator = function Iterator() {};
+                                win.Iterator.prototype = {};
+                            }
+                        } catch (e) {}
+                    }
+
+                    installIteratorShim(window);
+
+                    var originalAppendChild = Node.prototype.appendChild;
+                    Node.prototype.appendChild = function(child) {
+                        var result = originalAppendChild.call(this, child);
+                        try {
+                            if (child && child.tagName === 'IFRAME' && child.contentWindow) {
+                                installIteratorShim(child.contentWindow);
+                            }
+                        } catch (e) {}
+                        return result;
+                    };
+                })();
+            </script>
+            <script>
                 if (!window.pylon) {
                     window.pylon = {};
                 }
