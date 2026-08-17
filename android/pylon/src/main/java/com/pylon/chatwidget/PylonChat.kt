@@ -12,6 +12,7 @@ import android.util.Log
 import android.view.MotionEvent
 import android.view.View
 import android.webkit.ConsoleMessage
+import android.webkit.DownloadListener
 import android.webkit.JavascriptInterface
 import android.webkit.JsResult
 import android.webkit.ValueCallback
@@ -257,7 +258,31 @@ class PylonChat : FrameLayout {
 
         webView.setBackgroundColor(Color.TRANSPARENT)
 
+        // A tap on a pending attachment is an `<a download>` link to its blob: URL.
+        // Without a registered DownloadListener, Android WebView falls back to its
+        // own handling of that download — presenting the raw file full-screen with
+        // no close affordance and no indication of how to get back. The attachment
+        // is already visible as a thumbnail in the composer, so nothing more needs
+        // to happen with the file; swallow the download instead of letting that
+        // fallback run.
+        webView.setDownloadListener(DownloadListener { _, _, _, _, _ ->
+            Log.d(TAG, "Ignored in-place download (attachment preview)")
+        })
+
         webView.webViewClient = object : WebViewClient() {
+            override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+                // Tapping a pending (not yet sent) attachment navigates the WebView
+                // directly to its raw blob: URL for a "preview" — with no back button,
+                // close affordance, or any way to return to the composer. Block it
+                // there; the attachment is already visible as a thumbnail either way,
+                // so nothing is lost by staying put.
+                if (request?.url?.scheme == "blob") {
+                    Log.d(TAG, "Blocked in-place navigation to blob: URL (attachment preview)")
+                    return true
+                }
+                return super.shouldOverrideUrlLoading(view, request)
+            }
+
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
                 Log.d(TAG, "Page finished loading: $url")
@@ -471,28 +496,6 @@ class PylonChat : FrameLayout {
         webView.evaluateJavascript(jsCode, null)
     }
 
-    /**
-     * Tells the bubble-offset logic installed inside the widget's iframe (see
-     * [generateHtml]) whether the chat window is open, so it can back off the
-     * offset rather than pushing the full chat panel up with it.
-     */
-    private fun setBubbleOffsetChatOpenState(isOpen: Boolean) {
-        if (config.bubbleBottomOffsetPx <= 0) return
-        val js = """
-            javascript:(function() {
-                var frame = document.getElementById('pylon-frame');
-                var win = frame && frame.contentWindow;
-                if (!win) return;
-                win.PylonNativeChatWindowOpen = $isOpen;
-                var fn = $isOpen
-                    ? win.PylonNativeResetChatBubbleBottomOffset
-                    : win.PylonNativeApplyChatBubbleBottomOffset;
-                if (fn) fn();
-            })();
-        """.trimIndent()
-        webView.evaluateJavascript(js, null)
-    }
-
     fun openChat() {
         webView.evaluateJavascript("javascript:if(window.Pylon) { window.Pylon('show'); }", null)
     }
@@ -666,10 +669,14 @@ class PylonChat : FrameLayout {
                     // to be (re)installed on every such iframe too, the moment it's
                     // attached — before the loader inserts its script tag.
                     (function() {
-                        // Keeps the chat bubble clear of a host app's own bottom
-                        // chrome. Reset while the chat window is open — the bubble
-                        // and its container may be shared with the full chat panel,
-                        // and the panel itself should not be pushed up.
+                        // Keeps the chat bubble — and, since it shares a parent with
+                        // the full chat panel, the open panel too — clear of a host
+                        // app's own bottom chrome. Applied permanently, in both the
+                        // closed and open states, rather than toggled: the bubble can
+                        // be unmounted outright (not just hidden) when the panel
+                        // opens, and re-deriving "is it still the bubble's parent" at
+                        // that point is unreliable, so this keeps the same clearance
+                        // for whichever of the two is showing.
                         function installBubbleOffsetLogic(win) {
                             try {
                                 if (!win || win.__pylonNativeBubbleOffsetInstalled) return;
@@ -679,63 +686,74 @@ class PylonChat : FrameLayout {
                                 var FAB_ID = 'pylon-chat-bubble';
                                 var OFFSET_PX = ${config.bubbleBottomOffsetPx};
 
-                                function currentTargets() {
-                                    var bubble = doc.getElementById(FAB_ID);
-                                    if (!bubble) return [];
-                                    var list = [bubble];
-                                    if (bubble.parentElement) list.push(bubble.parentElement);
-                                    return list;
-                                }
-
-                                // The elements we last applied the offset to. Opening
-                                // the chat window can unmount the bubble outright rather
-                                // than just hiding it, replacing it with the chat panel
-                                // inside that same parent — so resetting has to clean up
-                                // the exact elements it touched, not re-query for the
-                                // bubble by ID, or a stale margin is left behind on what
-                                // is now the panel's own container.
-                                var appliedTargets = [];
-
-                                win.PylonNativeChatWindowOpen = false;
-
-                                win.PylonNativeResetChatBubbleBottomOffset = function() {
-                                    appliedTargets.forEach(function(t) {
-                                        t.style.removeProperty('bottom');
-                                        t.style.removeProperty('margin-bottom');
-                                    });
-                                    appliedTargets = [];
-                                };
-
-                                win.PylonNativeApplyChatBubbleBottomOffset = function() {
+                                function applyOffset() {
                                     if (OFFSET_PX <= 0) return;
-                                    if (win.PylonNativeChatWindowOpen === true) {
-                                        win.PylonNativeResetChatBubbleBottomOffset();
-                                        return;
-                                    }
-                                    var list = currentTargets();
-                                    list.forEach(function(t) {
+                                    var bubble = doc.getElementById(FAB_ID);
+                                    if (!bubble) return;
+                                    var targets = [bubble];
+                                    if (bubble.parentElement) targets.push(bubble.parentElement);
+                                    targets.forEach(function(t) {
                                         t.style.setProperty('bottom', 'env(safe-area-inset-bottom)', 'important');
                                         t.style.setProperty('margin-bottom', OFFSET_PX + 'px', 'important');
                                     });
-                                    appliedTargets = list;
-                                };
+                                }
+
+                                win.PylonNativeApplyChatBubbleBottomOffset = applyOffset;
 
                                 // The bubble mounts asynchronously and can re-render on
                                 // its own (unread badges, popups) without telling us, so
                                 // keep re-checking rather than relying on one application.
                                 [0, 150, 300, 600, 1000, 1500, 2500, 4000].forEach(function(delay) {
-                                    win.setTimeout(win.PylonNativeApplyChatBubbleBottomOffset, delay);
+                                    win.setTimeout(applyOffset, delay);
                                 });
 
                                 if (win.MutationObserver && (doc.body || doc.documentElement)) {
-                                    new win.MutationObserver(function() {
-                                        win.PylonNativeApplyChatBubbleBottomOffset();
-                                    }).observe(doc.body || doc.documentElement, { childList: true, subtree: true });
+                                    new win.MutationObserver(applyOffset)
+                                        .observe(doc.body || doc.documentElement, { childList: true, subtree: true });
                                 }
                             } catch (e) {}
                         }
 
+                        // Tapping a pending (not yet sent) attachment's thumbnail tries
+                        // to preview the file via a native mechanism that leaves no way
+                        // to close it. A DOM-ancestry check (e.g. "is this inside the
+                        // composer's contenteditable region") is fragile if the editor
+                        // renders attachments as a node view portalled elsewhere in the
+                        // document rather than as a true descendant — positioned to
+                        // look like it's inside the editor without actually being one.
+                        // A pending attachment's underlying blob: URL is a much more
+                        // direct signal: it's how the browser refers to a local,
+                        // not-yet-uploaded file, whereas a sent message's image has a
+                        // real https:// URL from Pylon's CDN — so this leaves
+                        // already-sent previews (which already have a working close
+                        // button) untouched no matter where in the DOM either one lives.
+                        function installAttachmentClickGuard(win) {
+                            try {
+                                if (!win || win.__pylonNativeAttachmentGuardInstalled) return;
+                                win.__pylonNativeAttachmentGuardInstalled = true;
+                                var doc = win.document;
+
+                                function isPendingAttachment(target) {
+                                    if (!target || !target.closest) return false;
+                                    var img = target.closest('img');
+                                    if (img && img.src && img.src.indexOf('blob:') === 0) return true;
+                                    var link = target.closest('a');
+                                    if (link && link.href && link.href.indexOf('blob:') === 0) return true;
+                                    return false;
+                                }
+
+                                doc.addEventListener('click', function(event) {
+                                    if (isPendingAttachment(event.target)) {
+                                        event.preventDefault();
+                                        event.stopPropagation();
+                                        event.stopImmediatePropagation();
+                                    }
+                                }, true);
+                            } catch (e) {}
+                        }
+
                         installBubbleOffsetLogic(window);
+                        installAttachmentClickGuard(window);
 
                         var originalAppendChild = Node.prototype.appendChild;
                         Node.prototype.appendChild = function(child) {
@@ -743,6 +761,7 @@ class PylonChat : FrameLayout {
                             try {
                                 if (child && child.tagName === 'IFRAME' && child.contentWindow) {
                                     installBubbleOffsetLogic(child.contentWindow);
+                                    installAttachmentClickGuard(child.contentWindow);
                                 }
                             } catch (e) {}
                             return result;
@@ -843,7 +862,6 @@ class PylonChat : FrameLayout {
         fun onChatWindowOpened() {
             post {
                 isChatWindowOpen = true
-                setBubbleOffsetChatOpenState(true)
                 listener?.onChatOpened()
             }
         }
@@ -852,7 +870,6 @@ class PylonChat : FrameLayout {
         fun onChatWindowClosed() {
             post {
                 isChatWindowOpen = false
-                setBubbleOffsetChatOpenState(false)
                 listener?.onChatClosed()
             }
         }

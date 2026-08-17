@@ -443,10 +443,51 @@ public class PylonChatView: UIView {
                         } catch (e) {}
                     }
 
-                    // Keeps the chat bubble clear of a host app's own bottom chrome.
-                    // Reset while the chat window is open — the bubble and its
-                    // container may be shared with the full chat panel, and the
-                    // panel itself should not be pushed up.
+                    // Tapping a pending (not yet sent) attachment's thumbnail tries to
+                    // preview the file via a native mechanism that leaves no way to
+                    // close it. A DOM-ancestry check (e.g. "is this inside the
+                    // composer's contenteditable region") is fragile if the editor
+                    // renders attachments as a node view portalled elsewhere in the
+                    // document rather than as a true descendant — positioned to look
+                    // like it's inside the editor without actually being one. A pending
+                    // attachment's underlying blob: URL is a much more direct signal:
+                    // it's how the browser refers to a local, not-yet-uploaded file,
+                    // whereas a sent message's image has a real https:// URL from
+                    // Pylon's CDN — so this leaves already-sent previews (which already
+                    // have a working close button) untouched no matter where in the DOM
+                    // either one lives.
+                    function installAttachmentClickGuard(win) {
+                        try {
+                            if (!win || win.__pylonNativeAttachmentGuardInstalled) return;
+                            win.__pylonNativeAttachmentGuardInstalled = true;
+                            var doc = win.document;
+
+                            function isPendingAttachment(target) {
+                                if (!target || !target.closest) return false;
+                                var img = target.closest('img');
+                                if (img && img.src && img.src.indexOf('blob:') === 0) return true;
+                                var link = target.closest('a');
+                                if (link && link.href && link.href.indexOf('blob:') === 0) return true;
+                                return false;
+                            }
+
+                            doc.addEventListener('click', function(event) {
+                                if (isPendingAttachment(event.target)) {
+                                    event.preventDefault();
+                                    event.stopPropagation();
+                                    event.stopImmediatePropagation();
+                                }
+                            }, true);
+                        } catch (e) {}
+                    }
+
+                    // Keeps the chat bubble — and, since it shares a parent with the
+                    // full chat panel, the open panel too — clear of a host app's own
+                    // bottom chrome. Applied permanently, in both the closed and open
+                    // states, rather than toggled: the bubble can be unmounted outright
+                    // (not just hidden) when the panel opens, and re-deriving "is it
+                    // still the bubble's parent" at that point is unreliable, so this
+                    // keeps the same clearance for whichever of the two is showing.
                     function installBubbleOffsetLogic(win) {
                         try {
                             if (!win || win.__pylonNativeBubbleOffsetInstalled) return;
@@ -456,64 +497,37 @@ public class PylonChatView: UIView {
                             var FAB_ID = 'pylon-chat-bubble';
                             var OFFSET_PX = \(Int(config.bubbleBottomOffset));
 
-                            function currentTargets() {
-                                var bubble = doc.getElementById(FAB_ID);
-                                if (!bubble) return [];
-                                var list = [bubble];
-                                if (bubble.parentElement) list.push(bubble.parentElement);
-                                return list;
-                            }
-
-                            // The elements we last applied the offset to. Opening the
-                            // chat window can unmount the bubble outright rather than
-                            // just hiding it, replacing it with the chat panel inside
-                            // that same parent — so resetting has to clean up the exact
-                            // elements it touched, not re-query for the bubble by ID,
-                            // or a stale margin is left behind on what is now the
-                            // panel's own container.
-                            var appliedTargets = [];
-
-                            win.PylonNativeChatWindowOpen = false;
-
-                            win.PylonNativeResetChatBubbleBottomOffset = function() {
-                                appliedTargets.forEach(function(t) {
-                                    t.style.removeProperty('bottom');
-                                    t.style.removeProperty('margin-bottom');
-                                });
-                                appliedTargets = [];
-                            };
-
-                            win.PylonNativeApplyChatBubbleBottomOffset = function() {
+                            function applyOffset() {
                                 if (OFFSET_PX <= 0) return;
-                                if (win.PylonNativeChatWindowOpen === true) {
-                                    win.PylonNativeResetChatBubbleBottomOffset();
-                                    return;
-                                }
-                                var list = currentTargets();
-                                list.forEach(function(t) {
+                                var bubble = doc.getElementById(FAB_ID);
+                                if (!bubble) return;
+                                var targets = [bubble];
+                                if (bubble.parentElement) targets.push(bubble.parentElement);
+                                targets.forEach(function(t) {
                                     t.style.setProperty('bottom', 'env(safe-area-inset-bottom)', 'important');
                                     t.style.setProperty('margin-bottom', OFFSET_PX + 'px', 'important');
                                 });
-                                appliedTargets = list;
-                            };
+                            }
+
+                            win.PylonNativeApplyChatBubbleBottomOffset = applyOffset;
 
                             // The bubble mounts asynchronously and can re-render on its
                             // own (unread badges, popups) without telling us, so keep
                             // re-checking rather than relying on a single application.
                             [0, 150, 300, 600, 1000, 1500, 2500, 4000].forEach(function(delay) {
-                                win.setTimeout(win.PylonNativeApplyChatBubbleBottomOffset, delay);
+                                win.setTimeout(applyOffset, delay);
                             });
 
                             if (win.MutationObserver && (doc.body || doc.documentElement)) {
-                                new win.MutationObserver(function() {
-                                    win.PylonNativeApplyChatBubbleBottomOffset();
-                                }).observe(doc.body || doc.documentElement, { childList: true, subtree: true });
+                                new win.MutationObserver(applyOffset)
+                                    .observe(doc.body || doc.documentElement, { childList: true, subtree: true });
                             }
                         } catch (e) {}
                     }
 
                     installIteratorShim(window);
                     installBubbleOffsetLogic(window);
+                    installAttachmentClickGuard(window);
 
                     var originalAppendChild = Node.prototype.appendChild;
                     Node.prototype.appendChild = function(child) {
@@ -522,6 +536,7 @@ public class PylonChatView: UIView {
                             if (child && child.tagName === 'IFRAME' && child.contentWindow) {
                                 installIteratorShim(child.contentWindow);
                                 installBubbleOffsetLogic(child.contentWindow);
+                                installAttachmentClickGuard(child.contentWindow);
                             }
                         } catch (e) {}
                         return result;
@@ -806,26 +821,6 @@ public class PylonChatView: UIView {
         webView.evaluateJavaScript(script, completionHandler: nil)
     }
 
-    /// Tells the bubble-offset logic installed inside the widget's iframe
-    /// (see `generateHTML()`) whether the chat window is open, so it can back
-    /// off the offset rather than pushing the full chat panel up with it.
-    private func setBubbleOffsetChatOpenState(_ isOpen: Bool) {
-        guard config.bubbleBottomOffset > 0 else { return }
-        let script = """
-        (function() {
-            var frame = document.getElementById('pylon-frame');
-            var win = frame && frame.contentWindow;
-            if (!win) return;
-            win.PylonNativeChatWindowOpen = \(isOpen);
-            var fn = \(isOpen)
-                ? win.PylonNativeResetChatBubbleBottomOffset
-                : win.PylonNativeApplyChatBubbleBottomOffset;
-            if (fn) fn();
-        })();
-        """
-        executeJavaScript(script)
-    }
-
     private func invokePylonCommand(_ command: String, arguments: [String] = [], isJsonObject: Bool = false) {
         let script: String
         if arguments.isEmpty {
@@ -854,6 +849,48 @@ extension PylonChatView: WKNavigationDelegate {
     public func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
         listener?.onPylonError(error: error.localizedDescription)
     }
+
+    public func webView(_ webView: WKWebView,
+                         decidePolicyFor navigationAction: WKNavigationAction,
+                         decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        // Tapping a pending (not yet sent) attachment navigates the frame directly to
+        // its raw blob: URL for a "preview" — with no back button, close affordance, or
+        // any way to return to the composer. Block it there; the attachment is already
+        // visible as a thumbnail either way, so nothing is lost by staying put.
+        if let url = navigationAction.request.url,
+           url.scheme == "blob",
+           navigationAction.targetFrame?.isMainFrame == true {
+            log("📱 Blocked in-place navigation to blob: URL (attachment preview)")
+            decisionHandler(.cancel)
+            return
+        }
+        decisionHandler(.allow)
+    }
+
+    // A tap on a pending attachment is an `<a download>` link to its blob: URL.
+    // WebKit (iOS 14.5+) recognizes the `download` attribute itself and converts
+    // the navigation straight into a WKDownload — bypassing decidePolicyFor above
+    // entirely — then presents its own system UI for it, with no close button and
+    // no indication a swipe-down is what dismisses it. Becoming the download's
+    // delegate ourselves lets us complete it silently instead: the attachment is
+    // already visible as a thumbnail in the composer, so nothing more needs to
+    // happen with the file.
+    @available(iOS 14.5, *)
+    public func webView(_ webView: WKWebView, navigationAction: WKNavigationAction, didBecome download: WKDownload) {
+        download.delegate = self
+    }
+}
+
+@available(iOS 14.5, *)
+extension PylonChatView: WKDownloadDelegate {
+    public func download(_ download: WKDownload,
+                          decideDestinationUsing response: URLResponse,
+                          suggestedFilename: String,
+                          completionHandler: @escaping (URL?) -> Void) {
+        let destination = FileManager.default.temporaryDirectory.appendingPathComponent(suggestedFilename)
+        try? FileManager.default.removeItem(at: destination)
+        completionHandler(destination)
+    }
 }
 
 // MARK: - WKUIDelegate
@@ -866,6 +903,19 @@ extension PylonChatView: WKUIDelegate {
             UIApplication.shared.open(url, options: [:], completionHandler: nil)
         }
         return nil
+    }
+
+    // Tapping a pending attachment's thumbnail (an <a> around a blob: image) hits
+    // WKWebView's own built-in link/image "Peek" preview before anything we
+    // implement above ever runs — a plain full-screen image with no close button
+    // and no indication that swiping down is what dismisses it. This is the
+    // standard way to opt a WKWebView out of that preview entirely: returning nil
+    // tells WebKit not to show one for any element, so the tap falls through to
+    // the page's own handling instead.
+    public func webView(_ webView: WKWebView,
+                         contextMenuConfigurationForElement elementInfo: WKContextMenuElementInfo,
+                         completionHandler: @escaping (UIContextMenuConfiguration?) -> Void) {
+        completionHandler(nil)
     }
 }
 
@@ -891,12 +941,10 @@ extension PylonChatView: WKScriptMessageHandler {
             case "onChatWindowOpened":
                 self.log("📱 Pylon: Chat Window OPENED ✅")
                 self.isChatWindowOpen = true
-                self.setBubbleOffsetChatOpenState(true)
                 self.listener?.onChatOpened()
             case "onChatWindowClosed":
                 let wasOpen = self.isChatWindowOpen
                 self.log("📱 Pylon: Chat Window CLOSED ❌ (wasOpen: \(wasOpen))")
-                self.setBubbleOffsetChatOpenState(false)
                 self.isChatWindowOpen = false
                 self.listener?.onChatClosed(wasOpen: wasOpen)
             case "onUnreadCountChanged":
