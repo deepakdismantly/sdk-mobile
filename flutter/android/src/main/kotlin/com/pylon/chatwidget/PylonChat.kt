@@ -33,10 +33,10 @@ import org.json.JSONObject
  */
 @SuppressLint("SetJavaScriptEnabled")
 class PylonChat : FrameLayout {
-
+    
     private val config: PylonConfig
     private var user: PylonUser?
-
+    
     /**
      * Create a PylonChat view with explicit configuration and user.
      * This is the recommended constructor for React Native and programmatic usage.
@@ -51,7 +51,7 @@ class PylonChat : FrameLayout {
         this.user = user
         initialize()
     }
-
+    
     /**
      * XML/AttributeSet constructor - uses singleton Pylon configuration.
      * Only for compatibility with XML layouts.
@@ -540,7 +540,7 @@ class PylonChat : FrameLayout {
         val idArg = JSONObject.quote(articleId)
         invokePylonCommand("showKnowledgeBaseArticle", idArg)
     }
-
+    
     fun clickElementBySelector(selector: String) {
         // Trigger a click on the element with the given ID selector.
         // Used by React Native's Android proxy-based touch pass-through system.
@@ -568,7 +568,7 @@ class PylonChat : FrameLayout {
     fun setListener(listener: PylonChatListener?) {
         this.listener = listener
     }
-
+    
     /**
      * Update the user for this chat instance and reload.
      */
@@ -578,7 +578,7 @@ class PylonChat : FrameLayout {
             initializePylon()
         }
     }
-
+    
     /**
      * Update the email hash for the current user.
      */
@@ -686,6 +686,17 @@ class PylonChat : FrameLayout {
                                 var FAB_ID = 'pylon-chat-bubble';
                                 var OFFSET_PX = ${config.bubbleBottomOffsetPx};
 
+                                // Only writes a property when its current value actually
+                                // differs — this now runs from a MutationObserver
+                                // watching this same style attribute (see below), so a
+                                // write that fires regardless of whether anything
+                                // changed would retrigger that observer forever.
+                                function setStyleIfChanged(t, prop, value) {
+                                    if (t.style.getPropertyValue(prop) !== value) {
+                                        t.style.setProperty(prop, value, 'important');
+                                    }
+                                }
+
                                 function applyOffset() {
                                     if (OFFSET_PX <= 0) return;
                                     var bubble = doc.getElementById(FAB_ID);
@@ -693,8 +704,8 @@ class PylonChat : FrameLayout {
                                     var targets = [bubble];
                                     if (bubble.parentElement) targets.push(bubble.parentElement);
                                     targets.forEach(function(t) {
-                                        t.style.setProperty('bottom', 'env(safe-area-inset-bottom)', 'important');
-                                        t.style.setProperty('margin-bottom', OFFSET_PX + 'px', 'important');
+                                        setStyleIfChanged(t, 'bottom', 'env(safe-area-inset-bottom)');
+                                        setStyleIfChanged(t, 'margin-bottom', OFFSET_PX + 'px');
                                     });
                                 }
 
@@ -708,42 +719,72 @@ class PylonChat : FrameLayout {
                                 });
 
                                 if (win.MutationObserver && (doc.body || doc.documentElement)) {
+                                    // attributes/style is required, not just childList:
+                                    // Pylon can rewrite the bubble's own inline style
+                                    // directly (e.g. repositioning it for on-screen-
+                                    // keyboard avoidance) without ever adding or removing
+                                    // a node — a childList-only observer misses that
+                                    // entirely, and once the fixed setTimeout ladder above
+                                    // has run out, nothing would ever re-apply our
+                                    // override again.
                                     new win.MutationObserver(applyOffset)
-                                        .observe(doc.body || doc.documentElement, { childList: true, subtree: true });
+                                        .observe(doc.body || doc.documentElement, {
+                                            childList: true,
+                                            subtree: true,
+                                            attributes: true,
+                                            attributeFilter: ['style']
+                                        });
                                 }
                             } catch (e) {}
                         }
 
                         // Tapping a pending (not yet sent) attachment's thumbnail tries
                         // to preview the file via a native mechanism that leaves no way
-                        // to close it. A DOM-ancestry check (e.g. "is this inside the
-                        // composer's contenteditable region") is fragile if the editor
-                        // renders attachments as a node view portalled elsewhere in the
-                        // document rather than as a true descendant — positioned to
-                        // look like it's inside the editor without actually being one.
-                        // A pending attachment's underlying blob: URL is a much more
-                        // direct signal: it's how the browser refers to a local,
-                        // not-yet-uploaded file, whereas a sent message's image has a
-                        // real https:// URL from Pylon's CDN — so this leaves
-                        // already-sent previews (which already have a working close
-                        // button) untouched no matter where in the DOM either one lives.
+                        // to close it. Confirmed via a live DOM dump (the widget
+                        // uploads a pending attachment immediately on selection, so
+                        // there is no blob: URL to key off — its <img> already has a
+                        // real assets.usepylon.com URL, same as a sent message's). The
+                        // actual click target is its wrapper: a div carrying
+                        // role="button" and the cursor-zoom-in class, not the <img> or
+                        // an <a>:
+                        //   <div class="group/attachment ... cursor-zoom-in ..."
+                        //        role="button" tabindex="0"> <img .../> </div>
+                        // Sent messages in the thread (which already have a working,
+                        // closeable preview) don't use this wrapper, so this only
+                        // touches the composer's not-yet-sent attachments.
                         function installAttachmentClickGuard(win) {
                             try {
                                 if (!win || win.__pylonNativeAttachmentGuardInstalled) return;
                                 win.__pylonNativeAttachmentGuardInstalled = true;
                                 var doc = win.document;
+                                var SELECTOR = '[role="button"].cursor-zoom-in';
 
-                                function isPendingAttachment(target) {
-                                    if (!target || !target.closest) return false;
-                                    var img = target.closest('img');
-                                    if (img && img.src && img.src.indexOf('blob:') === 0) return true;
-                                    var link = target.closest('a');
-                                    if (link && link.href && link.href.indexOf('blob:') === 0) return true;
-                                    return false;
+                                // A JS click listener reacts to a click event — but if
+                                // whatever opens the native preview is a touch/gesture
+                                // recognizer rather than a click at all, there is no
+                                // event for this to ever catch. Removing the element
+                                // from hit testing entirely, at the CSS level, closes
+                                // that gap: with nothing to hit, nothing downstream —
+                                // click handler or native gesture recognizer alike —
+                                // ever engages.
+                                function disableHitTesting() {
+                                    doc.querySelectorAll(SELECTOR).forEach(function(el) {
+                                        el.style.setProperty('pointer-events', 'none', 'important');
+                                    });
                                 }
 
+                                disableHitTesting();
+                                if (win.MutationObserver && (doc.body || doc.documentElement)) {
+                                    new win.MutationObserver(disableHitTesting).observe(
+                                        doc.body || doc.documentElement,
+                                        { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'role'] }
+                                    );
+                                }
+
+                                // Kept as defense-in-depth for anything pointer-events
+                                // alone doesn't cover.
                                 doc.addEventListener('click', function(event) {
-                                    if (isPendingAttachment(event.target)) {
+                                    if (event.target && event.target.closest && event.target.closest(SELECTOR)) {
                                         event.preventDefault();
                                         event.stopPropagation();
                                         event.stopImmediatePropagation();
@@ -752,16 +793,33 @@ class PylonChat : FrameLayout {
                             } catch (e) {}
                         }
 
-                        installBubbleOffsetLogic(window);
-                        installAttachmentClickGuard(window);
+                        function installAllOn(win) {
+                            installBubbleOffsetLogic(win);
+                            installAttachmentClickGuard(win);
+                        }
+
+                        installAllOn(window);
 
                         var originalAppendChild = Node.prototype.appendChild;
                         Node.prototype.appendChild = function(child) {
                             var result = originalAppendChild.call(this, child);
                             try {
-                                if (child && child.tagName === 'IFRAME' && child.contentWindow) {
-                                    installBubbleOffsetLogic(child.contentWindow);
-                                    installAttachmentClickGuard(child.contentWindow);
+                                if (child && child.tagName === 'IFRAME') {
+                                    if (child.contentWindow) installAllOn(child.contentWindow);
+                                    // An iframe that navigates internally (e.g. the
+                                    // chat window moving from its home view to a
+                                    // specific conversation) gets a whole new
+                                    // Document — and, for the "installed" flags to
+                                    // mean anything, a fresh window too. That happens
+                                    // without ever calling appendChild on this
+                                    // element again, so the guards above only cover
+                                    // its first paint. Reinstalling on every load
+                                    // re-covers each subsequent one.
+                                    child.addEventListener('load', function() {
+                                        try {
+                                            if (child.contentWindow) installAllOn(child.contentWindow);
+                                        } catch (e) {}
+                                    });
                                 }
                             } catch (e) {}
                             return result;
@@ -830,7 +888,7 @@ class PylonChat : FrameLayout {
         )
         return joined
     }
-
+    
     private fun escapeJavaScriptString(string: String): String {
         return string
             .replace("\\", "\\\\")
@@ -887,10 +945,10 @@ class PylonChat : FrameLayout {
             post {
                 log("Updating interactive bounds for: $selector ($left, $top) - ($right, $bottom)")
                 interactiveBounds[selector]?.set(left.toInt(), top.toInt(), right.toInt(), bottom.toInt())
-
+                
                 // Notify listener about bounds change
                 listener?.onInteractiveBoundsChanged(selector, left, top, right, bottom)
-
+                
                 if (config.debugMode) {
                     debugOverlay.bounds = interactiveBounds
                 }
